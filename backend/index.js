@@ -9,6 +9,7 @@ const db = require('./db/db');
 const noblox = require('noblox.js');
 const history = require('connect-history-api-fallback');
 const ora = require('ora');
+let package = require('../package.json');
 const fs = require('fs');
 const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz1234567890";
 let backendonly = false;
@@ -19,16 +20,22 @@ if (backendonly) {
 }
 
 const _ = require('lodash');
+const LoggingEngine = require('./util/loggingEngine');
+const logging = new LoggingEngine();
+
 const bcrypt = require('bcrypt');
 const bodyParser = require('body-parser');
 const cookieSession = require('cookie-session');
 const NodeCache = require("node-cache");
+const permissionsManager = require('./util/permissionsManager');
+const settingsManager = require('./util/settingsManager');
+const settings = new settingsManager();
+const permissions = new permissionsManager(settings);
 const usernames = new NodeCache();
 const pfps = new NodeCache();
 const ews = require('express-ws')(app);
 let activews = [];
 
-let settings = {};
 
 
 const cors = require('cors');
@@ -49,25 +56,43 @@ app.use(cookieSession({
 }));
 
 (async () => {
-    let configforgroup = await db.config.findOne({ name: 'group' });
-    if (!configforgroup) return;
-    settings.group = configforgroup.value;
+    await settings.load();
+    let configforranking = settings.get('ranking');
+    if (configforranking) {
+        let u;
+        try {
+            u = await noblox.setCookie(configforranking.cookie);
+        } catch (e) {
+            settings.settings.ranking = {
+                apikey: configforranking.hash,
+            };
+        }
 
-    let configforactivity = await db.config.findOne({ name: 'activity' });
-    settings.activity = configforactivity.value;
+        if (u) {
+            settings.settings.ranking = {
+                username: u.UserName,
+                uid: u.UserID,
+                pfp: await fetchpfp(u.UserID),
+                apikey: configforranking.hash,
+            };
+        }
 
-    let configforuser = await db.config.findOne({ name: 'roles' });
-    if (configforuser) settings.roles = configforuser.value;
+    }
 
-    let configfornotice = await db.config.findOne({ name: 'noticetext' });
-    if (configfornotice) settings.noticetext = configfornotice.value;
-
-    let configforproxy = await db.config.findOne({ name: 'wproxy' });
-    if (configforproxy) settings.proxy = configforproxy.value;
+    runload()
 })();
 
-app.use('/api/', require('./activity')(usernames, pfps, settings));
-app.use('/api/', require('./staff')(usernames, pfps, settings))
+async function runload() {
+    console.log('Running tovy!')
+    app.use('/api/activity/', require('./activity')(usernames, pfps, settings, permissions));
+    app.use('/api/wall/', require('./wall')(usernames, pfps, settings, permissions));
+    app.use('/api/staff', require('./staff')(usernames, pfps, settings, permissions));
+    app.use('/api/settings/', require('./settings')(usernames, pfps, settings, permissions, logging));
+    app.use('/api/sessions/', require('./session')(usernames, pfps, settings, permissions));
+    app.use('/api/ranking/', require('./ranking')(usernames, pfps, settings, permissions));
+}
+
+
 
 if (!backendonly) {
     let staticFileMiddleware = express.static(path.join(__dirname, '../dist'));
@@ -85,10 +110,9 @@ if (!backendonly) {
     app.use('/', staticFileMiddleware);
 }
 
-app.use('/api/', require('./settings')(usernames, pfps, settings));
 
 app.post('/api/webhooks/:id/:secret', async (req, res) => {
-    if (!settings.proxy) return res.status(500).send({ success: false, message: 'proxy not set' });
+    if (!settings.get('wproxy')) return res.status(500).send({ success: false, message: 'proxy not set' });
     await axios.post('https://discord.com/api/webhooks/' + req.params.id + '/' + req.params.secret, req.body).then(r => {
         res.send({
             success: true
@@ -98,8 +122,19 @@ app.post('/api/webhooks/:id/:secret', async (req, res) => {
     })
 })
 
+app.get('/info', (req, res) => {
+    let tovyr = settings.get('tovyr');
+    if (!tovyr?.enabled) return res.status(500).send({ success: false, message: 'tovyr not enabled' });
+    if (req.headers['api-key'] !== tovyr.key) return res.status(500).send({ success: false, message: 'invalid api key' });
+    res.send({
+        success: true,
+        version: package.version,
+    })
+    
+});
+
 app.patch('/api/webhooks/:id/:secret/messages/:msg', async (req, res) => {
-    if (!settings.proxy) return res.status(500).send({ success: false, message: 'proxy not set' });
+    if (!settings.get('wproxy')) return res.status(500).send({ success: false, message: 'proxy not set' });
     await axios.patch(`https://discord.com/api/webhooks/${req.params.id}/${req.params.secret}/messages/${req.params.msg}`, req.body).then(r => {
         res.send(r.data)
     }).catch(e => {
@@ -108,7 +143,7 @@ app.patch('/api/webhooks/:id/:secret/messages/:msg', async (req, res) => {
 })
 
 app.delete('/api/webhooks/:id/:secret/messages/:msg', async (req, res) => {
-    if (!settings.proxy) return res.status(500).send({ success: false, message: 'proxy not set' });
+    if (!settings.get('wproxy')) return res.status(500).send({ success: false, message: 'proxy not set' });
 
     await axios.delete(`https://discord.com/api/webhooks/${req.params.id}/${req.params.secret}/messages/${req.params.msg}`, req.body).then(r => {
         res.send({
@@ -120,6 +155,8 @@ app.delete('/api/webhooks/:id/:secret/messages/:msg', async (req, res) => {
 })
 
 app.post('/api/finishSignup', async (req, res) => {
+    if (settings.get('group')) return res.status(500).send({ success: false, message: 'group signups are disabled' });
+    if (!req.body.password) return res.status(500).send({ success: false, message: 'password not set' });
     const hash = bcrypt.hashSync(req.body.password, 10);
     let uid = await noblox.getIdFromUsername(req.body.username)
 
@@ -131,23 +168,76 @@ app.post('/api/finishSignup', async (req, res) => {
 
     req.session.userid = uid;
 
-    await db.config.create({
-        name: 'group',
-        value: req.body.group
-    });
+    settings.set('group', req.body.group)
 
     let a = {
         key: chooseRandom(letters, 18).join(''),
         role: null
     }
 
-    await db.config.create({
-        name: 'activity',
-        value: a
-    });
-    settings.activity = a;
-    settings.group = req.body.group;
+    settings.set('activity', a);
     res.status(200).json({ message: 'Successfully created user!' });
+    await settings.set('roles', [
+        {
+          "name": "Member",
+          "permissions": [
+            "view_staff_activity"
+          ],
+          "id": 1
+        },
+        {
+          "name": "HR",
+          "permissions": [
+            "view_staff_activity",
+            "host_sessions",
+            "post_on_wall"
+          ],
+          "id": 2
+        },
+        {
+          "name": "Manager",
+          "permissions": [
+            "view_staff_activity",
+            "manage_notices",
+            "update_shout",
+            "post_on_wall",
+            "host_sessions"
+          ],
+          "id": 3
+        },
+        {
+          "name": "Admin",
+          "permissions": [
+            "view_staff_activity",
+            "admin",
+            "manage_notices",
+            "manage_staff_activity",
+            "update_shout",
+            "post_on_wall",
+            "host_sessions"
+          ],
+          "id": 4
+        }
+      ])
+    await db.message.create({
+        id: 1,
+        author: 469981094,
+        message: `## Welcome to Tovy!
+Here are a few things that will help you get started
+- You can customize your Tovy instance in the settings 
+- Download the loader and start tracking activity on the settings page
+- Manage your groups staff on the staff page
+
+**Links**
+Here are some links that may help you in the future
+- [View some features on our website](https://tovyblox.xyz/)
+- [Report feedback or bugs](https://feedback.tovyblox.xyz/)
+- [Get help and chat in our discord](https://discord.gg/nsTHUewP3u)
+- [Contribute to our src code](https://github.com/tovyblox/tovy)`,
+        date: Date.now(),
+        deleted: false
+    })
+    if (req.body.regester) setTimeout(() => settings.regester(req.get('origin')), 2000);
 });
 
 /**
@@ -158,8 +248,11 @@ app.post('/api/finishSignup', async (req, res) => {
 app.get('/api/profile', async (req, res) => {
     if (!await db.config.findOne({ name: 'group' })) return res.status(400).json({ message: 'NGS' });
     if (!req.session.userid) return res.status(401).json({ message: 'Not logged in' });
-    let info = await noblox.getPlayerInfo(req.session.userid);
-    let color = await db.config.findOne({ name: 'color' });
+    let info = await noblox.getPlayerInfo(req.session.userid).catch(err => {
+        return res.status(401).json({ message: 'Not logged in' });
+    });
+    if (!info) return;
+    let color = await settings.get('color');
     let user = await db.user.findOne({ userid: req.session.userid });
     if (!user) {
         res.status(401).json({ message: 'Not logged in' });
@@ -170,17 +263,18 @@ app.get('/api/profile', async (req, res) => {
         return;
     };
 
-    let role = user.role != 0 ? settings.roles.find(role => role.id === user.role).permissions : ["view_staff_activity", "admin", "manage_notices", "update_shout", 'manage_staff_activity'];
+    let role = user.role != 0 ? settings.get('roles').find(role => role.id === user.role).permissions : ["view_staff_activity", "admin", "manage_notices", "update_shout", 'manage_staff_activity', 'host_sessions', 'post_on_wall'];
     info.perms = role;
+    info.id = req.session.userid;
 
     let pfp = await noblox.getPlayerThumbnail({ userIds: req.session.userid, cropType: "headshot" });
     res.status(200).json({
         pfp: pfp[0].imageUrl,
         info: info,
         group: {
-            color: color ? color.value : 'grey lighten-2',
-            noticetext: settings.noticetext,
-            id: settings.group
+            color: color || 'grey lighten-2',
+            noticetext: settings.get('noticetext'),
+            id: settings.get('group')
         }
     });
 });
@@ -189,7 +283,7 @@ app.post('/api/invite', async (req, res) => {
     if (!req.session.userid) return res.status(401).json({ message: 'Not logged in' });
 
     let user = await db.user.findOne({ userid: req.session.userid });
-    if (user.role !== undefined && user.role !== null) return res.status(400).json({ message: 'Already a memer' });
+    if (user.role === 0) return res.status(200).json({ message: 'Successfully joined group' });
 
     let invites = await db.config.findOne({ name: 'invites' });
     let invite = invites.value.find(invite => invite.code === req.body.code);
@@ -203,11 +297,11 @@ app.post('/api/invite', async (req, res) => {
 
 app.post('/api/signup/start', async (req, res) => {
     var emojis = [
-        '📋', '🎉', '🎂', '📆', '✔️', '📃', '👍', '➕', '📢'
+        '📋', '🎉', '🎂', '📆', '✔️', '📃', '👍', '➕', '📢', '🐒', '🐴', '🐑', '🐘', '🐼', '🐧', '🐦', '🐤', '🐥', '🐣', '🐔', '🐍', '🐢', '🐛', '🐝', '🐜', '📕', '📗', '📘', '📙', '📓', '📔', '📒', '📚', '📖', '🔖', '🎯', '🏈', '🏀', '⚽', '⚾', '🎾', '🎱', '🏉', '🎳', '⛳', '🚵', '🚴', '🏁', '🏇'
     ];
 
 
-    let verifys = `%${chooseRandom(emojis, 5).join('')}%`;
+    let verifys = `🤖${chooseRandom(emojis, 11).join('')}`;
     let uid = await noblox.getIdFromUsername(req.body.username).catch(e => {
         res.status(404).json({ message: 'No such user!' });
         return;
@@ -259,7 +353,7 @@ app.post('/api/signup/finish', async (req, res) => {
         });
     } else {
         finduser.passwordhash = hash;
-        finduser.role = invite || undefined;
+        finduser.role = invite || finduser.role || undefined;
         await finduser.save()
     }
 
@@ -273,6 +367,8 @@ app.post('/api/signup/finish', async (req, res) => {
 });
 
 app.post('/api/login', async (req, res) => {
+    if (!req.body.username || !req.body.password) return res.status(400).json({ message: 'No username or password!' });
+    if (typeof req.body.username !== 'string' || typeof req.body.password !== 'string') return res.status(400).json({ message: 'Invalid username or password!' });
     let target = await noblox.getIdFromUsername(req.body.username).catch(err => { });
     if (!target) return res.status(400).json({ message: 'User not found' });
     let user = await db.user.findOne({ userid: target });

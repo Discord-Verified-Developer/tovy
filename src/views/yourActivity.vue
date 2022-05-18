@@ -5,25 +5,40 @@
         <p class="text-h4 font-weight-bold mt-14">
           Hi {{ this.$store.state.user.displayName }},
         </p>
-        <p class="text-body-1 font-weight-bold mt-n5 gray">Here is your activity for the week</p>
+        <p class="text-body-1 font-weight-bold mt-n5 gray">Here is your activity!</p>
       </v-container>
     </v-sheet>
-    <v-container class="mt-n16 mx-auto">
+    <v-container v-if="!loading" class="mt-n16 mx-auto">
+      <v-row class="mt-n6 mb-1">
+        <v-col order="last">
+          <v-card outlined class="">
+            <v-card-text class=""> Time spent in-game </v-card-text>
+            <p class="ml-3 mb-2 mt-5 text-h2 mt-n5">{{ stats.mins }}</p>
+          </v-card>
+        </v-col>
+        <v-col order="last">
+          <v-card outlined class="">
+            <v-card-text class=""> Play sessions </v-card-text>
+            <p class="ml-3 mb-2 mt-5 text-h2 mt-n5">
+              {{ data.filter((e) => e.type === "session").length }}
+            </p>
+          </v-card>
+        </v-col>
+      </v-row>
       <v-card min-width="300" @click.stop="dialog.active = true" ripple class="">
         <v-card-title> 📋 Create a notice </v-card-title>
         <v-card-text class="mt-n6">
           Create an inactivity notice for yourself
         </v-card-text>
       </v-card>
-
-      <notice v-if="data.length" :data="data" ></notice>
+      <notice v-if="data.length" :data="data"></notice>
     </v-container>
     <v-row justify="center">
       <v-dialog v-model="dialog.active" max-width="600px">
         <v-card>
           <v-card-title>New notice </v-card-title>
           <v-card-text class="mt-n5"
-            >{{ this.$store.state.group.noticetext || 'No notice policy' }}
+            >{{ this.$store.state.group.noticetext || "No notice policy" }}
           </v-card-text>
           <v-alert
             type="error"
@@ -80,23 +95,28 @@
 </template>
 
 <script>
-import notice from '@/components/notice'
+import notice from "@/components/notice";
 export default {
   name: "HelloWorld",
 
   data: () => ({
     drawer: { active: false, loading: false },
-    loading: false,
+    loading: true,
     dates: [],
     reason: null,
-
     dialog: { active: false, loading: false, valid: false },
     data: [],
+    stats: {
+      sessions: 0,
+      mins: 0,
+    },
     groups: "dog",
   }),
-  components: {notice},
+  components: { notice },
   mounted: function () {
     this.$http.get("/activity/@me", { withCredentials: true }).then((response) => {
+      this.loading = false;
+      this.stats.mins = response.data.totaltime;
       this.data = response.data.sessions.sort((a, b) => {
         return new Date(b.start).getTime() - new Date(a.start).getTime();
       });
@@ -105,7 +125,8 @@ export default {
   methods: {
     goto: function (url) {
       this.$router.push(url);
-    }, getcur: function () {
+    },
+    getcur: function () {
       let current = new Date();
       return current.toISOString().substring(0, 10);
     },
@@ -116,9 +137,11 @@ export default {
       if (this.dates.length <= 1) return;
       this.$http
         .post(
-          "/createia",
+          "/activity/createia",
           {
-            date: this.dates,
+            date: this.dates.sort((a, b) => {
+              return new Date(a).getTime() - new Date(b).getTime();
+            }),
             r: this.reason,
           },
           { withCredentials: true }
@@ -133,7 +156,6 @@ export default {
           this.reason = null;
         });
     },
-  
   },
 };
 </script>

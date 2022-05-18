@@ -98,6 +98,9 @@
                       <v-card-text class="mt-n6 grey--text"
                         >@{{ item.username }}</v-card-text
                       >
+                      <v-card-text class="mt-n6 grey--text"
+                        >{{ item.time }}</v-card-text
+                      >
                     </div></v-layout
                   >
                 </div>
@@ -273,7 +276,7 @@ export default {
   }),
   components: {},
   mounted: function () {
-    this.$http.get("/group/roles", { withCredentials: true }).then((response) => {
+    this.$http.get("/settings/groles", { withCredentials: true }).then((response) => {
       this.groles = response.data.roles.splice(1);
     });
   },
@@ -304,7 +307,7 @@ export default {
         .post(
           "/mactivity/change",
           {
-            mins: this.prompt.value,
+            mins: parseInt(this.prompt.value),
             users: this.data.filter((item) => item.selected).map((item) => item.userId),
             type: this.prompt.type,
           },
@@ -336,7 +339,7 @@ export default {
     updatemembers: function () {
       this.loading = true;
       this.$http
-        .get("/group/members?role=" + this.srole, { withCredentials: true })
+        .get("/staff/gmembers?role=" + this.srole, { withCredentials: true })
         .then((response) => {
           this.data = response.data.members;
           this.loading = false;
